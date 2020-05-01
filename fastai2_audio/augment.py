@@ -26,72 +26,85 @@ mk_class('RemoveType', **{o:o.lower() for o in ['Trim', 'All', 'Split']},
          doc="All methods of removing silence as attributes to get tab-completion and typo-proofing")
 
 # Cell
-def _merge_splits(splits, pad):
-    clip_end = splits[-1][1]
-    merged = []
-    i=0
-    while i < len(splits):
-        start = splits[i][0]
-        while splits[i][1] < clip_end and splits[i][1] + pad >= splits[i+1][0] - pad:
-            i += 1
-        end = splits[i][1]
-        merged.append(np.array([max(start-pad, 0), min(end+pad, clip_end)]))
-        i+=1
-    return np.stack(merged)
+class RemoveSilence(Transform):
+    "Split signal at points of silence greater than 2*pad_ms"
+    def __init__(self, remove_type=RemoveType.Trim, threshold=20, pad_ms=20,**kwargs):
+        super().__init__(**kwargs)
+        self.remove_type = remove_type
+        self.threshold = threshold
+        self.pad_ms = pad_ms
 
-def RemoveSilence(remove_type=RemoveType.Trim, threshold=20, pad_ms=20):
-    def _inner(ai:AudioTensor)->AudioTensor:
-        "Split signal at points of silence greater than 2*pad_ms"
-        if remove_type is None: return ai
-        padding = int(pad_ms/1000*ai.sr)
+    def _merge_splits(self,splits, pad):
+        clip_end = splits[-1][1]
+        merged = []
+        i=0
+        while i < len(splits):
+            start = splits[i][0]
+            while splits[i][1] < clip_end and splits[i][1] + pad >= splits[i+1][0] - pad:
+                i += 1
+            end = splits[i][1]
+            merged.append(np.array([max(start-pad, 0), min(end+pad, clip_end)]))
+            i+=1
+        return np.stack(merged)
+
+    def encodes(self,ai:AudioTensor)->AudioTensor:
+        if self.remove_type is None: return ai
+        padding = int(self.pad_ms/1000*ai.sr)
         if(padding > ai.nsamples): return ai
-        splits = split(ai.numpy(), top_db=threshold, hop_length=padding)
-        if remove_type == "split":
+        splits = split(ai.numpy(), top_db=self.threshold, hop_length=padding)
+        if self.remove_type == "split":
             sig =  [ai[:,(max(a-padding,0)):(min(b+padding,ai.nsamples))]
-                    for (a, b) in _merge_splits(splits, padding)]
-        elif remove_type == "trim":
+                    for (a, b) in self._merge_splits(splits, padding)]
+        elif self.remove_type == "trim":
             sig = [ai[:,(max(splits[0, 0]-padding,0)):splits[-1, -1]+padding]]
-        elif remove_type == "all":
+        elif self.remove_type == "all":
             sig = [torch.cat([ai[:,(max(a-padding,0)):(min(b+padding,ai.nsamples))]
-                              for (a, b) in _merge_splits(splits, padding)], dim=1)]
+                              for (a, b) in self._merge_splits(splits, padding)], dim=1)]
         else:
             raise ValueError(f"Valid options for silence removal are None, 'split', 'trim', 'all' not '{remove_type}'.")
         ai.data = torch.cat(sig, dim=-1)
         return ai
-    return _inner
+
 
 # Cell
-def Resample(sr_new):
-    def _inner(ai:AudioTensor)->AudioTensor:
-        "Resample using faster polyphase technique and avoiding FFT computation"
-        if(ai.sr == sr_new): return ai
+class Resample(Transform):
+    "Resample using faster polyphase technique and avoiding FFT computation"
+    def __init__(self, sr_new, **kwargs):
+        super().__init__(**kwargs)
+        self.sr_new = sr_new
+
+    def encodes(self, ai:AudioTensor)->AudioTensor:
+        if(ai.sr == self.sr_new): return ai
         sig_np = ai.numpy()
-        sr_gcd = math.gcd(ai.sr, sr_new)
-        resampled = resample_poly(sig_np, int(sr_new/sr_gcd), int(ai.sr/sr_gcd), axis=-1)
+        sr_gcd = math.gcd(ai.sr, self.sr_new)
+        resampled = resample_poly(sig_np, int(self.sr_new/sr_gcd), int(ai.sr/sr_gcd), axis=-1)
         ai.data = torch.from_numpy(resampled.astype(np.float32))
-        ai.sr = sr_new
+        ai.sr = self.sr_new
         return ai
-    return _inner
 
 # Cell
 mk_class('AudioPadType', **{o:o.lower() for o in ['Zeros', 'Zeros_After', 'Repeat']},
          doc="All methods of padding audio as attributes to get tab-completion and typo-proofing")
 
 # Cell
-def CropSignal(duration, pad_mode=AudioPadType.Zeros):
-    def _inner(ai: AudioTensor)->AudioTensor:
-        "Crops signal to be length specified in ms by duration, padding if needed"
+class CropSignal(Transform):
+    "Crops signal to be length specified in ms by duration, padding if needed"
+    def __init__(self, duration, pad_mode=AudioPadType.Zeros,**kwargs):
+        super().__init__(**kwargs)
+        self.duration = duration
+        self.pad_mode = pad_mode
+
+    def encodes(self, ai:(AudioTensor)) -> AudioTensor:
         sig = ai.data
         orig_samples = ai.nsamples
-        crop_samples = int((duration/1000)*ai.sr)
+        crop_samples = int((self.duration/1000)*ai.sr)
         if orig_samples == crop_samples: return ai
         elif orig_samples < crop_samples:
-            ai.data = _tfm_pad_signal(sig, crop_samples, pad_mode=pad_mode)
+            ai.data = _tfm_pad_signal(sig, crop_samples, pad_mode=self.pad_mode)
         else:
             crop_start = random.randint(0, int(orig_samples-crop_samples))
             ai.data = sig[:,crop_start:crop_start+crop_samples]
         return ai
-    return _inner
 
 # Cell
 def _tfm_pad_signal(sig, width, pad_mode=AudioPadType.Zeros):
@@ -151,15 +164,20 @@ mk_class('NoiseColor', **{o:i-2 for i,o in enumerate(['Violet', 'Blue', 'White',
          doc="All possible colors of noise as attributes to get tab-completion and typo-proofing")
 
 # Cell
-def AddNoise(noise_level=0.05, color=NoiseColor.White):
-    def _inner(ai: AudioTensor)->AudioTensor:
+class AddNoise(Transform):
+    def __init__(self,noise_level=0.05, color=NoiseColor.White,**kwargs):
+        super().__init__(**kwargs)
+        self.noise_level = noise_level
+        self.color = color
+
+    def encodes(self,ai: AudioTensor)->AudioTensor:
         # if it's white noise, implement our own for speed
-        if color==0: noise = torch.randn_like(ai.data)
-        else:        noise = torch.from_numpy(cn.powerlaw_psd_gaussian(exponent=color, size=ai.nsamples)).float()
-        scaled_noise = noise * ai.data.abs().mean() * noise_level
+        if self.color==0: noise = torch.randn_like(ai.data)
+        else:        noise = torch.from_numpy(cn.powerlaw_psd_gaussian(exponent=self.color, size=ai.nsamples)).float()
+        scaled_noise = noise * ai.data.abs().mean() * self.noise_level
         ai.data += scaled_noise
         return ai
-    return _inner
+
 
 # Cell
 @patch
@@ -222,32 +240,38 @@ class SignalLoss(RandTransform):
     def encodes(self, ai:AudioTensor): return lose_signal(ai, self.loss_pct)
 
 # Cell
-# downmixMono was removed from torchaudio, we now just take the mean across channels
-# this works for both batches and individual items
-def DownmixMono():
-    def _inner(ai: AudioTensor)->AudioTensor:
+class DownmixMono(Transform):
+    # downmixMono was removed from torchaudio, we now just take the mean across channels
+    # this works for both batches and individual items
+    def __init__(self,**kwargs):
+        super().__init__(**kwargs)
+
+    def encodes(self, ai: AudioTensor)->AudioTensor:
         """Randomly replaces amplitude of signal with 0. Simulates analog info loss"""
         downmixed = ai.data.contiguous().mean(-2).unsqueeze(-2)
         return AudioTensor(downmixed, ai.sr)
-    return _inner
 
 # Cell
-def CropTime(duration, pad_mode=AudioPadType.Zeros):
-    def _inner(sg:AudioSpectrogram)->AudioSpectrogram:
-        "Random crops full spectrogram to be length specified in ms by crop_duration"
+class CropTime(Transform):
+    "Random crops full spectrogram to be length specified in ms by crop_duration"
+    def __init__(self,duration, pad_mode=AudioPadType.Zeros,**kwargs):
+        store_attr(self, "duration,pad_mode")
+        super().__init__(**kwargs)
+
+    def encodes(self, sg:AudioSpectrogram)->AudioSpectrogram:
         sr, hop = sg.sr, sg.hop_length
-        w_crop = int((sr*duration)/(1000*hop))+1
+        w_crop = int((sr*self.duration)/(1000*hop))+1
         w_sg   = sg.shape[-1]
         if     w_sg == w_crop: sg_crop = sg
-        elif   w_sg <  w_crop: sg_crop = _tfm_pad_spectro(sg, w_crop, pad_mode=pad_mode)
+        elif   w_sg <  w_crop: sg_crop = _tfm_pad_spectro(sg, w_crop, pad_mode=self.pad_mode)
         else:
             crop_start = random.randint(0, int(w_sg - w_crop))
             sg_crop = sg[:,:,crop_start:crop_start+w_crop]
             sg_crop.sample_start = int(crop_start*hop)
-            sg_crop.sample_end   = sg_crop.sample_start + int(duration*sr)
+            sg_crop.sample_end   = sg_crop.sample_start + int(self.duration*sr)
         sg.data = sg_crop
         return sg
-    return _inner
+
 
 # Cell
 def _tfm_pad_spectro(sg, width, pad_mode=AudioPadType.Zeros):
@@ -266,45 +290,55 @@ def _tfm_pad_spectro(sg, width, pad_mode=AudioPadType.Zeros):
         raise ValueError(f"pad_mode {pad_m} not currently supported, only 'zeros', 'zeros_after', or 'repeat'")
 
 # Cell
-def MaskFreq(num_masks=1, size=20, start=None, val=None, **kwargs):
-    def _inner(sg:AudioSpectrogram)->AudioSpectrogram:
-        "Google SpecAugment time masking from https://arxiv.org/abs/1904.08779."
-        nonlocal start
+class MaskFreq(Transform):
+    "Google SpecAugment time masking from https://arxiv.org/abs/1904.08779."
+    def __init__(self,num_masks=1, size=20, start=None, val=None, **kwargs):
+        store_attr(self,"num_masks,size,start,val")
+        super().__init__(**kwargs)
+
+    def encodes(self, sg:AudioSpectrogram)->AudioSpectrogram:
+        start = self.start
         channel_mean = sg.contiguous().view(sg.size(0), -1).mean(-1)[:,None,None]
-        mask_val = channel_mean if val is None else val
+        mask_val = channel_mean if self.val is None else self.val
         c, y, x = sg.shape
-        for _ in range(num_masks):
-            mask = torch.ones(size, x) * mask_val
-            if start is None: start= random.randint(0, y-size)
-            if not 0 <= start <= y-size:
+        for _ in range(self.num_masks):
+            mask = torch.ones(self.size, x) * mask_val
+            if start is None: start= random.randint(0, y-self.size)
+            if not 0 <= start <= y-self.size:
                 raise ValueError(f"Start value '{start}' out of range for AudioSpectrogram of shape {sg.shape}")
-            sg[:,start:start+size,:] = mask
-            start = None
+            sg[:,start:start+self.size,:] = mask
         return sg
-    return _inner
+
 
 # Cell
-def MaskTime(num_masks=1, size=20, start=None, val=None, **kwargs):
-    def _inner(sg:AudioSpectrogram)->AudioSpectrogram:
+class MaskTime(Transform):
+    def __init__(self,num_masks=1, size=20, start=None, val=None, **kwargs):
+        store_attr(self,"num_masks,size,start,val")
+        super().__init__(**kwargs)
+
+    def encodes(self,sg:AudioSpectrogram)->AudioSpectrogram:
         sg.data = torch.einsum('...ij->...ji', sg)
-        sg.data = MaskFreq(num_masks, size, start, val, **kwargs)(sg)
+        sg.data = MaskFreq(self.num_masks, self.size, self.start, self.val)(sg)
         sg.data = torch.einsum('...ij->...ji', sg)
         return sg
-    return _inner
+
 
 # Cell
-def SGRoll(max_shift_pct=0.5, direction=0, **kwargs):
+class SGRoll(Transform):
     "Shifts spectrogram along x-axis wrapping around to other side"
-    if int(direction) not in [-1, 0, 1]:
-        raise ValueError("Direction must be -1(left) 0(bidirectional) or 1(right)")
-    def _inner(sg:AudioSpectrogram)->AudioSpectrogram:
-        nonlocal direction
-        direction = random.choice([-1, 1]) if direction == 0 else direction
+    def __init__(self,max_shift_pct=0.5, direction=0, **kwargs):
+        if int(direction) not in [-1, 0, 1]:
+            raise ValueError("Direction must be -1(left) 0(bidirectional) or 1(right)")
+        store_attr(self,'max_shift_pct,direction')
+        super().__init__(**kwargs)
+
+    def encodes(self,sg:AudioSpectrogram)->AudioSpectrogram:
+        direction = random.choice([-1, 1]) if self.direction == 0 else self.direction
         w = sg.shape[-1]
-        roll_by = int(w*random.random()*max_shift_pct*direction)
+        roll_by = int(w*random.random()*self.max_shift_pct*direction)
         sg.data = sg.roll(roll_by, dims=-1)
         return sg
-    return _inner
+
 
 # Cell
 def _torchdelta(sg:AudioSpectrogram, order=1, width=9):
@@ -315,21 +349,26 @@ def _torchdelta(sg:AudioSpectrogram, order=1, width=9):
     return AudioSpectrogram(torch.from_numpy(librosa.feature.delta(sg.numpy(), order=order, width=width)))
 
 # Cell
-def Delta(width=9):
-    td = partial(_torchdelta, width=width)
-    def _inner(sg:AudioSpectrogram)->AudioSpectrogram:
-        new_channels = [torch.stack([c, td(c, order=1), td(c, order=2)]) for c in sg]
+class Delta(Transform):
+    def __init__(self, width=9,**kwargs):
+        self.width = width
+        self.td = partial(_torchdelta, width=width)
+
+    def encodes(self,sg:AudioSpectrogram)->AudioSpectrogram:
+        new_channels = [torch.stack([c, self.td(c, order=1), self.td(c, order=2)]) for c in sg]
         sg.data = torch.cat(new_channels, dim=0)
         return sg
-    return _inner
 
 # Cell
-def TfmResize(size, interp_mode="bilinear", **kwargs):
+class TfmResize(Transform):
     "Temporary fix to allow image resizing transform"
-    def _inner(sg:AudioSpectrogram)->AudioSpectrogram:
-        nonlocal size
+    def __init__(self,size, interp_mode="bilinear", **kwargs):
+        store_attr(self,"size,interp_mode")
+        super().__init__(**kwargs)
+
+    def encodes(self,sg:AudioSpectrogram)->AudioSpectrogram:
+        size = self.size
         if isinstance(size, int): size = (size, size)
         c,y,x = sg.shape
-        sg.data = F.interpolate(sg.unsqueeze(0), size=size, mode=interp_mode, align_corners=False).squeeze(0)
+        sg.data = F.interpolate(sg.unsqueeze(0), size=size, mode=self.interp_mode, align_corners=False).squeeze(0)
         return sg
-    return _inner
