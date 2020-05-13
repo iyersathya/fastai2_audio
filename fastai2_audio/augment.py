@@ -312,14 +312,19 @@ class MaskFreq(Transform):
 
 # Cell
 class MaskFreqRandom(RandTransform):
-    def __init__(self,num_masks=1, size=20, start=None, val=None, **kwargs):
-        store_attr(self,"num_masks,size,start,val")
+    def __init__(self,num_masks=1, min_size=0,max_size=20, start=None, val=None, **kwargs):
+        store_attr(self,"num_masks,min_size,max_size,start,val")
         super().__init__(**kwargs)
 
     def before_call(self, b, split_idx):
         if not split_idx:
-            self.size, self.val = [random.randint(5, 20) for i in range(2)]
+            if self.val:
+                self.val = random.randint(0, val)
+            self.size = random.randint(self.min_size, self.max_size)
             self.start = None
+        else:
+            self.size = (self.max_size- self.min_size)//2
+
 
     def encodes(self, sg:AudioSpectrogram)->AudioSpectrogram:
         start = self.start
@@ -349,14 +354,18 @@ class MaskTime(Transform):
 
 # Cell
 class MaskTimeRandom(RandTransform):
-    def __init__(self,num_masks=1, size=20, start=None, val=None, **kwargs):
-        store_attr(self,"num_masks,size,start,val")
+    def __init__(self,num_masks=1, min_size=0,max_size=20, start=None, val=None, **kwargs):
+        store_attr(self,"num_masks,min_size,max_size,start,val")
         super().__init__(**kwargs)
 
     def before_call(self, b, split_idx):
         if not split_idx:
-            self.size, self.val = [random.randint(5, 20) for i in range(2)]
+            if self.val:
+                self.val = random.randint(0, val)
+            self.size = random.randint(self.min_size, self.max_size)
             self.start = None
+        else:
+            self.size = (self.max_size- self.min_size)//2
 
     def encodes(self,sg:AudioSpectrogram)->AudioSpectrogram:
         sg.data = torch.einsum('...ij->...ji', sg)
